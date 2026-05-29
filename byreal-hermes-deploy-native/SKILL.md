@@ -1,6 +1,6 @@
 ---
 name: byreal-hermes-deploy-native
-version: 0.2.2
+version: 0.2.3
 description: "Deploy or sync the Hermes Telegram agent on top of RealClaw's built-in LLM API. Trigger on 'install hermes', 'deploy hermes', 'setup hermes', 'sync hermes', 'update hermes'."
 ---
 
@@ -10,7 +10,7 @@ description: "Deploy or sync the Hermes Telegram agent on top of RealClaw's buil
 >
 > RealClaw is the parent runtime; Hermes is its Telegram-side child. This skill clones RealClaw's brain — every skill, the full memory store, AGENTS.md, TOOLS.md, USER.md, SOUL.md, wallet access — into a hermes-agent runtime under `~/.openclaw/hermes/`, then attaches it to a new TG bot. Boot it and it's RealClaw with a Telegram surface; the SOUL.md identity block tells Hermes who it is and that RealClaw spawned it.
 >
-> **Depends on**: AGENTS.md §Skill Updates & Config Safety (this skill is review-gated; `HERMES_AGENT_REF` must be a reviewed commit SHA before production), §Security Red Lines, §Wallet (address authority), §Secrets.
+> **Depends on**: AGENTS.md §Skill Updates & Config Safety (this skill is review-gated; `HERMES_AGENT_REF` is pinned to a reviewed commit SHA — see Step 3, never use a moving ref), §Security Red Lines, §Wallet (address authority), §Secrets.
 
 ## References
 
@@ -142,24 +142,44 @@ ln -sfn "$HERMES_HOME" "$HOME/.hermes"
 
 ### Step 3: Clone hermes-agent at a pinned ref
 
-Bump `HERMES_AGENT_REF` to a reviewed commit SHA before shipping — a moving `main` is a supply-chain hole.
+`HERMES_AGENT_REF` is pinned to an immutable commit SHA. **Never replace it with a moving ref** (`main`, branch name, or even a tag — tags can be re-pointed by the upstream owner). To upgrade hermes-agent: review the upstream diff against the current SHA, get security sign-off, then update the constant to the new SHA.
+
+The script `git fetch`-es origin so the pinned SHA can be checked out even if it's not on `main` anymore (e.g. force-push reorganises history). The post-checkout `rev-parse` echoes the resolved SHA; verify it matches the pinned constant.
 
 ```bash
 export HERMES_HOME="$HOME/.openclaw/hermes"
 export PATH="$HERMES_HOME/bin:$PATH"
 
-HERMES_AGENT_REF="main"  # TODO: pin to a reviewed commit SHA before production use
+# Pinned to NousResearch/hermes-agent tag v2026.5.29 (release commit "chore: release v0.15.1").
+# Bump only after upstream diff review + security sign-off. Do NOT use a branch ref.
+HERMES_AGENT_REF="e71a2bd11b733f3be7cf99deafde0066c343d462"
 HERMES_AGENT_REPO="https://github.com/NousResearch/hermes-agent.git"
 
 # Pin python-telegram-bot — supply-chain parity with uv and hermes-agent pins.
 PTB_VERSION="21.6"
+
+# Reject anything other than a 40-char hex SHA — defends against a future maintainer
+# silently downgrading the pin to a branch/tag/short-SHA.
+if ! [[ "$HERMES_AGENT_REF" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: HERMES_AGENT_REF must be a full 40-char commit SHA, got: $HERMES_AGENT_REF" >&2
+  exit 1
+fi
 
 if [ ! -d "$HERMES_HOME/hermes-agent/.git" ]; then
   git clone "$HERMES_AGENT_REPO" "$HERMES_HOME/hermes-agent"
 fi
 git -C "$HERMES_HOME/hermes-agent" fetch --quiet origin
 git -C "$HERMES_HOME/hermes-agent" checkout --detach --quiet "$HERMES_AGENT_REF"
-echo "hermes-agent at $(git -C "$HERMES_HOME/hermes-agent" rev-parse --short HEAD)"
+
+# Hard-assert checkout actually landed at the pinned SHA. Without this, a silent
+# checkout failure would leave the previous (possibly stale or attacker-controlled)
+# tree in place and only the echo would run.
+ACTUAL_SHA=$(git -C "$HERMES_HOME/hermes-agent" rev-parse HEAD)
+if [ "$ACTUAL_SHA" != "$HERMES_AGENT_REF" ]; then
+  echo "ERROR: hermes-agent HEAD is $ACTUAL_SHA, expected $HERMES_AGENT_REF — refusing to continue" >&2
+  exit 1
+fi
+echo "hermes-agent pinned at $ACTUAL_SHA"
 
 cd "$HERMES_HOME/hermes-agent"
 if ! "$HERMES_HOME/hermes-agent/venv/bin/python" -c "import sys" 2>/dev/null; then
